@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.tgz
+*.log
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.DS_Store
+.omo/*
+!.omo/evidence/
+.omo/evidence/*
+!.omo/evidence/delivery.md

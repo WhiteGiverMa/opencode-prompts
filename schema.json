@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "opencode-prompts definition",
+  "description": "Definition file for the opencode-prompts OpenCode v2 plugin. Maps existing native agent IDs to prompt policies. Mirrors the plugin decoder: unknown fields are rejected, agent IDs and slot names stay free-form, and there is no model-family registry.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["agents"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional editor hint. The plugin only requires a nonempty string."
+    },
+    "version": {
+      "const": 1,
+      "description": "Optional format version. When present it must be the number 1."
+    },
+    "agents": {
+      "type": "object",
+      "description": "Maps native agent IDs, for example \"build\", to prompt policies. The plugin never creates agents.",
+      "propertyNames": { "minLength": 1 },
+      "additionalProperties": { "$ref": "#/$defs/policy" }
+    }
+  },
+  "$defs": {
+    "templateSource": {
+      "description": "Inline template text, or a file read relative to the definition directory.",
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["file"],
+          "properties": {
+            "file": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "slotSource": {
+      "description": "Inline text, a file read relative to the definition directory, or one raw runtime binding.",
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["file"],
+          "properties": {
+            "file": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["runtime"],
+          "properties": {
+            "runtime": {
+              "enum": ["agent", "model", "tools"],
+              "description": "Insert raw host data. Strings render as-is; other values render as 2-space JSON."
+            }
+          }
+        }
+      ]
+    },
+    "slots": {
+      "type": "object",
+      "description": "User-named placeholders referenced from the template. Names must be nonempty and must not contain whitespace, braces or colons.",
+      "propertyNames": { "pattern": "^[^\\s{}:]+$" },
+      "additionalProperties": { "$ref": "#/$defs/slotSource" }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["models"],
+      "properties": {
+        "models": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Anchored, case-sensitive glob patterns matched against the full providerID/modelID ref. * and ? also span /."
+        },
+        "excludeModels": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "When any pattern matches the model ref, the whole rule is skipped."
+        },
+        "template": { "$ref": "#/$defs/templateSource" },
+        "slots": { "$ref": "#/$defs/slots" },
+        "allowRepeatedSlots": { "type": "boolean" }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "template": {
+          "$ref": "#/$defs/templateSource",
+          "description": "Default template. It may be omitted when a matching rule supplies one."
+        },
+        "slots": { "$ref": "#/$defs/slots" },
+        "allowRepeatedSlots": {
+          "type": "boolean",
+          "description": "Allow a used slot to appear more than once. Defaults to false. Repeated {{name:omit}} markers are never allowed."
+        },
+        "rules": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/rule" },
+          "description": "All matching rules apply in order; later rules win per field, and slots merge by name."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,3 @@
+- Match the existing code style; do not reformat unrelated lines.
+- Keep changes small and verified; run the project's checks when you can.
+- Never write secrets, tokens or credentials into files or logs.

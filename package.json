@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "opencode-prompts",
+  "version": "0.1.0",
+  "description": "User-owned OpenCode prompt templates with ordered model overrides",
+  "type": "module",
+  "license": "MIT",
+  "author": "WhiteGiverMa",
+  "main": "./dist/server.js",
+  "types": "./dist/server.d.ts",
+  "exports": {
+    ".": "./dist/server.js",
+    "./server": "./dist/server.js",
+    "./core": "./dist/core.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "server.js",
+    "README.md",
+    "README.en.md",
+    "schema.json",
+    "examples",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/WhiteGiverMa/opencode-prompts.git"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "effect": "4.0.0-rc.112",
+    "jsonc-parser": "3.3.1"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.0.24 <3"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.0.24",
+    "@types/bun": "1.3.14",
+    "@types/node": "24.13.6",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,43 @@
+// Example definition for the opencode-prompts plugin.
+// File paths in templates and slots resolve against this file's directory,
+// not the project directory.
+{
+  // Editor hint only; the plugin just requires a nonempty string.
+  "$schema": "../schema.json",
+  "version": 1,
+  "agents": {
+    // The key must be an existing native agent ID. Rename it, for example to
+    // "build", to manage the role you actually use.
+    "assistant": {
+      // Fallback template for models without a matching rule.
+      "template": { "file": "templates/default.md" },
+      "slots": {
+        "project_rules": { "file": "slots/common.md" },
+        // Runtime bindings insert raw host data, with no plugin-authored text.
+        "agent_id": { "runtime": "agent" },
+        "model_json": { "runtime": "model" },
+        "tools_json": { "runtime": "tools" },
+        // Declared and deliberately omitted: the value is never rendered and
+        // its source is never read. See {{limitations:omit}} in the templates.
+        "limitations": "this line is never rendered"
+      },
+      "rules": [
+        {
+          // Family branch: GPT models switch to the GPT-oriented template.
+          "models": ["openai/gpt-*"],
+          "excludeModels": ["openai/gpt-3*"],
+          "template": { "file": "templates/gpt.md" }
+        },
+        {
+          // All matching rules apply in order and later rules win per field.
+          // This one refines a single slot for GPT-5 models while keeping the
+          // template and every other slot from the rules above.
+          "models": ["openai/gpt-5*"],
+          "slots": {
+            "project_rules": "For GPT-5 models: state assumptions before editing files."
+          }
+        }
+      ]
+    }
+  }
+}
