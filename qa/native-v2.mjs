@@ -293,7 +293,7 @@ async function main() {
   const testerSystem = async () => (await api('/api/agent')).json.data.find((agent) => agent.id === 'tester')?.system;
   const submit = async (id, caseName, options) => { plans.set(caseName, [{ text: `QA_FINISHED ${caseName}` }]); await prompt(id, `QA_CASE=${caseName}`, options); await waitSession(id); };
   await waitFor('isolated server up', async () => (await api('/api/plugin', 'GET', undefined, { allowError: true })).ok, 45_000, 250);
-  await waitFor('opencode-prompts plugin active', async () => (await pluginList()).some((plugin) => plugin.id === 'opencode-prompts' && plugin.state?.status === 'active'), 45_000, 500);
+  await waitFor('o3p.prompt.templates plugin active', async () => (await pluginList()).some((plugin) => plugin.id === 'o3p.prompt.templates' && plugin.state?.status === 'active'), 45_000, 500);
   console.log(`[ready] ${versionOutput} on 127.0.0.1:${port} (isolated)`);
   // 1. startup-invalid definition then repair in the same host/session.
   await caseRecord('startup-invalid-json-repaired', { startupLogCode: 'definition-json', admissionHttpError: true, modelCallDelta: 0, primaryDelta: 0, titleDelta: 0, userRows: 0, repairedSameSession: true }, async () => {
@@ -491,7 +491,7 @@ async function main() {
     await submit(rulesSession.id, 'plugin-disabled');
     const text = latestPrimary('plugin-disabled').system;
     assert(text.includes(ORIGINAL) && !text.includes('<<<opencode-prompts|'), 'native system not restored while disabled');
-    assert((await pluginList()).some((plugin) => plugin.id === 'opencode-prompts'), 'plugin entry vanished instead of disabling');
+    assert((await pluginList()).some((plugin) => plugin.id === 'o3p.prompt.templates'), 'plugin entry vanished instead of disabling');
     return { entryStillListed: true, nativeSystem: true, ownedMarkers: false };
   });
   // 13. re-enabling the plugin manages the tester again.
@@ -508,7 +508,7 @@ async function main() {
   // 14. removing the plugin entry restores native definitions.
   await caseRecord('plugin-entry-removed-restores-native', { notListed: true, nativeSystem: true, ownedMarkers: false }, async () => {
     writeConfig('none');
-    await waitFor('removed convergence', async () => !(await pluginList()).some((plugin) => plugin.id === 'opencode-prompts') && !String(await testerSystem()).includes('<<<opencode-prompts|'), 20_000, 1000);
+    await waitFor('removed convergence', async () => !(await pluginList()).some((plugin) => plugin.id === 'o3p.prompt.templates') && !String(await testerSystem()).includes('<<<opencode-prompts|'), 20_000, 1000);
     await submit(rulesSession.id, 'plugin-removed');
     const text = latestPrimary('plugin-removed').system;
     assert(text.includes(ORIGINAL) && !text.includes('<<<opencode-prompts|'), 'native system not restored after removal');

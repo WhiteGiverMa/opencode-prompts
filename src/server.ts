@@ -10,7 +10,7 @@ import { Agent, Plugin } from '@opencode/plugin';
 import { PromptsRuntime, type AgentEditor, type ModelRefLike, type RuntimeHost } from './runtime.ts';
 
 export default Plugin.define({
-  id: 'opencode-prompts',
+  id: 'o3p.prompt.templates',
   async setup(ctx) {
     const runtime = new PromptsRuntime(createHost(ctx), ctx.options);
     return runtime.start();
