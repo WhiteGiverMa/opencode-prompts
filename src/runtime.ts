@@ -12,14 +12,23 @@
  * prepares its own wrapped seed first, then stores it under its agent ID. The
  * transform never reads files, never renders, and never touches policies other
  * than the prepared entries, so a failed admission cannot change another
- * session's seed.
+ * session's seed. A request that reaches context with no owned region (host
+ * restart, which resumes turns through `session.synthetic` and skips the
+ * prompt hook) re-seeds that role once and then renders normally.
  */
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { loadDefinition, preparePrompt, resolveSourcePath, type Definition, type Policy } from './core.ts';
 import { AdapterError, PromptsBlockedError, failureFields, isRuntimeValue, toFailure, type Failure } from './failure.ts';
 import { DiagnosticsLog, type LogPhase } from './log.ts';
-import { hasMarkerNamespace, hasOwnedRegion, replaceOwnedRegion, wrapSeed } from './markers.ts';
+import {
+  hasMarkerNamespace,
+  hasOwnedRegion,
+  markerNamespaceCount,
+  replaceOwnedRegion,
+  seedNativeRegion,
+  wrapSeed,
+} from './markers.ts';
 import { resolvePath, sameFile } from './paths.ts';
 import type {
   AgentEditor,
@@ -35,8 +44,15 @@ import type {
 import { snapshotTools, type ToolSnapshot } from './tools.ts';
 
 export { PromptsBlockedError } from './failure.ts';
-export { beginMarker, endMarker, hasOwnedRegion, replaceOwnedRegion } from './markers.ts';
-export type { SystemPartLike } from './markers.ts';
+export {
+  beginMarker,
+  endMarker,
+  hasOwnedRegion,
+  markerNamespaceCount,
+  replaceOwnedRegion,
+  seedNativeRegion,
+} from './markers.ts';
+export type { RegionReplacement, SystemPartLike } from './markers.ts';
 export type {
   AgentEditor,
   AgentRecord,
@@ -139,6 +155,10 @@ export class PromptsRuntime {
   private readonly seeds = new Map<string, string>();
   /** Seeds observed as applied by the transform during the last rebuild. */
   private readonly applied = new Map<string, string>();
+  /** Native system per role, captured before this activation ever seeds it. */
+  private readonly nativeSystems = new Map<string, string | undefined>();
+  /** In-flight first capture per role; concurrent recoveries share one snapshot. */
+  private readonly nativeCaptures = new Map<string, Promise<string | undefined>>();
   private disposed = false;
 
   constructor(host: RuntimeHost, raw: RuntimeOptionsInput) {
@@ -269,15 +289,7 @@ export class PromptsRuntime {
         }
         throw error;
       }
-      const seed = wrapSeed(this.generation, resolved.agentID, body);
-      this.seeds.set(resolved.agentID, seed);
-      await this.ensureRegistered(signature);
-      if (this.applied.get(resolved.agentID) !== seed) await this.host.reloadAgents();
-      const refreshed = (await this.host.listAgents()).find((agent) => agent.id === resolved.agentID);
-      if (refreshed === undefined) throw new AdapterError({ code: 'agent-missing' });
-      if (!hasOwnedRegion(refreshed.system, this.generation, resolved.agentID)) {
-        throw new AdapterError({ code: 'seed-missing', slot: 'system' });
-      }
+      await this.seedAgent(signature, resolved.agentID, wrapSeed(this.generation, resolved.agentID, body));
       this.log.write({
         phase: 'admission',
         code: 'ok',
@@ -316,7 +328,20 @@ export class PromptsRuntime {
         return;
       }
       const body = prepared.render({ agent: event.agent, model: event.model, tools: event.tools });
-      replaceOwnedRegion(event.system, this.generation, event.agent, body);
+      if (replaceOwnedRegion(event.system, this.generation, event.agent, body) === 'missing') {
+        // The host resumes suspended turns through `session.synthetic`, which
+        // bypasses the prompt hook, so the first request after a restart has no
+        // in-memory seed. Use the pre-takeover native snapshot, seed the
+        // registry, then make this in-flight request use the same seed.
+        // Duplicate or altered markers never reach here: replaceOwnedRegion
+        // still throws for them.
+        const native = await this.nativeFor(event.agent);
+        const seed = wrapSeed(this.generation, event.agent, body);
+        seedNativeRegion(event.system, native, seed);
+        await this.seedAgent(managedSignature(definition), event.agent, seed);
+        this.log.write({ phase: 'context', code: 'reseeded', session, agent, model });
+        return;
+      }
       this.log.write({ phase: 'context', code: 'ok', session, agent, model });
     } catch (error) {
       const failure = toFailure(error);
@@ -371,6 +396,56 @@ export class PromptsRuntime {
   }
 
   /**
+   * Returns the native system a role had before this activation took it over.
+   * The first capture is shared per role, so two concurrent resumed requests
+   * cannot let the second one observe the first one's seed in the registry.
+   * A role already seeded without a baseline has no trustworthy source and
+   * fails closed instead of guessing.
+   */
+  private nativeFor(agentID: string): Promise<string | undefined> {
+    if (this.nativeSystems.has(agentID)) return Promise.resolve(this.nativeSystems.get(agentID));
+    const pending = this.nativeCaptures.get(agentID);
+    if (pending !== undefined) return pending;
+    if (this.seeds.has(agentID)) {
+      return Promise.reject(new AdapterError({ code: 'region-missing', slot: 'system', count: 0 }));
+    }
+    const capture = (async () => {
+      const agent = (await this.host.listAgents()).find((entry) => entry.id === agentID);
+      if (agent === undefined) throw new AdapterError({ code: 'agent-missing' });
+      this.nativeSystems.set(agentID, agent.system);
+      return agent.system;
+    })();
+    this.nativeCaptures.set(agentID, capture);
+    return capture.finally(() => {
+      if (this.nativeCaptures.get(agentID) === capture) this.nativeCaptures.delete(agentID);
+    });
+  }
+
+  /**
+   * Applies a wrapped seed to the host registry and verifies the owned region
+   * survived the reload. Admission and context recovery share this path so a
+   * recovered request is seeded exactly like an admitted one.
+   */
+  private async seedAgent(signature: string, agentID: string, seed: string): Promise<void> {
+    if (!hasOwnedRegion(seed, this.generation, agentID)) {
+      throw new AdapterError({
+        code: 'region-malformed',
+        slot: 'system',
+        count: markerNamespaceCount(seed),
+      });
+    }
+    await this.nativeFor(agentID);
+    this.seeds.set(agentID, seed);
+    await this.ensureRegistered(signature);
+    if (this.applied.get(agentID) !== seed) await this.host.reloadAgents();
+    const refreshed = (await this.host.listAgents()).find((agent) => agent.id === agentID);
+    if (refreshed === undefined) throw new AdapterError({ code: 'agent-missing' });
+    if (!hasOwnedRegion(refreshed.system, this.generation, agentID)) {
+      throw new AdapterError({ code: 'seed-missing', slot: 'system' });
+    }
+  }
+
+  /**
    * Registers the late seed transform once, then reloads only when the managed
    * agent set changed (pruning removed seeds) or a caller forces a restore.
    */
@@ -414,7 +489,11 @@ export class PromptsRuntime {
       if (managed.has(id)) continue;
       this.seeds.delete(id);
       this.applied.delete(id);
+      this.nativeSystems.delete(id);
       removed += 1;
+    }
+    for (const id of [...this.nativeSystems.keys()]) {
+      if (!managed.has(id)) this.nativeSystems.delete(id);
     }
     return removed;
   }
@@ -444,6 +523,8 @@ export class PromptsRuntime {
     this.registrations.length = 0;
     this.seeds.clear();
     this.applied.clear();
+    this.nativeSystems.clear();
+    this.nativeCaptures.clear();
     if (this.transform !== undefined) {
       try {
         await this.host.reloadAgents();

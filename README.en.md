@@ -67,6 +67,24 @@ A runnable example lives in `examples/` — copy the whole directory and swap in
 
 When a message is blocked, read the log: JSONL, one line per event with `phase`, `code`, `hint` and file positions. The usual suspects — broken JSONC (`definition-json`), unused or repeated slots (`slot-missing` / `slot-repeated`), unreadable template (`template-file`), unknown agent in the host (`agent-missing`). Fix the file and send again; the same session recovers without a restart.
 
+## Usage limitation: automatic recovery after a restart
+
+The plugin template owns a managed agent's role body. You **do not need** to duplicate it in OpenCode's `agents.<id>.system`. Omitting that field or setting it to `""` is valid; the host then uses its built-in default. However, the current public plugin API exposes neither reliable role-body provenance nor an awaited preflight before a resumed request selects its agent, so automatic recovery is not fully supported:
+
+| Scenario | Current behavior |
+| --- | --- |
+| An unmanaged agent | Unchanged host behavior; not affected |
+| A new ordinary user message to a managed agent | Admission establishes the seed, then the template is used; native `system` may be omitted or empty |
+| Automatic recovery after restart with a nonempty native `system` that uniquely and exactly matches a request part | Automatically reseeded; logs `context/reseeded` |
+| Automatic recovery of a managed agent with native `system` omitted or `""` | The resumed request can fail with `region-missing` before model dispatch |
+| An earlier hook rewrote, wrapped or duplicated the markerless native body, preventing a unique exact match | Also blocked conservatively rather than guessing which part to overwrite |
+
+This is a **known recovery compatibility gap, not a configuration error**. The plugin will not overwrite `system[0]` or retain the default body alongside an appended template to bypass ownership checks. Independent parts added by other plugins are preserved; prefixes and suffixes outside an existing valid marker pair are preserved too.
+
+After this error, **send a new ordinary user message** in the same session so admission can establish a fresh seed. Waiting, pressing continue, or repeating synthetic/resume work does not guarantee recovery. For automatic recovery, a workaround is to configure a nonempty fallback `system` suitable for use when this plugin is disabled. It is not the template body and need not duplicate it; the earlier-hook limitation above still applies. `system: ""` does not mean there is no system prompt.
+
+The project currently keeps the host unmodified and retains ownership checks. Full support requires a reliable host preflight or role-provenance API. See the [known-issue record](docs/known-issue-region-missing-after-restart.md) for reproduction, evidence and the missing host capability.
+
 ## Etc
 
 - Preview a render offline, without starting OpenCode:
@@ -82,5 +100,6 @@ When a message is blocked, read the log: JSONL, one line per event with `phase`,
   ```
 
 - Full QA: `node qa/native-v2.mjs` boots the official binary with a mock provider in an isolated environment, 26 cases.
+- Restart recovery QA: `node qa/restart-resume.mjs` SIGKILLs an isolated `serve --service` with two in-flight sessions sharing one agent and using different models. The default case checks recovery with a nonempty native system and independent neighbor parts. `QA_SYSTEM_MODE=omitted` / `empty` reproduce the known gap; `QA_NEIGHBOR_MODE=wrapped` reproduces the restriction on wrapping a markerless role body before recovery. These gap cases currently exit nonzero; they are not fixed. Set `OPENCODE_V2_BINARY` to select a host binary.
 - Verified on: official v2.0.24 + Linux/WSL2 + local mock.
 - MIT, see [LICENSE](LICENSE).

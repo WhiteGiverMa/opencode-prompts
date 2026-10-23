@@ -39,6 +39,7 @@ interface FakeAgent {
 
 const OPENAI: ModelRefLike = { id: 'gpt-x', providerID: 'openai' };
 const ANTHROPIC: ModelRefLike = { id: 'claude-y', providerID: 'anthropic' };
+const DEFAULT_SYSTEM = 'HOST DEFAULT SYSTEM';
 
 class FakeHost implements RuntimeHost {
   readonly directory: string;
@@ -174,7 +175,7 @@ class FakeHost implements RuntimeHost {
   }
 
   contextOf(sessionID: string, agentID: string, model: ModelRefLike, prefix = '', suffix = ''): ContextEvent {
-    const seed = this.seedOf(agentID);
+    const seed = this.seedOf(agentID) || DEFAULT_SYSTEM;
     return {
       sessionID,
       agent: agentID,
@@ -707,6 +708,172 @@ describe('region integrity and removal', () => {
     await expect(
       host.fireContext(context(seed.replace('|begin>>>', '|be gin>>>'))),
     ).rejects.toMatchObject({ code: 'region-malformed' });
+    await cleanup();
+  });
+
+  test('a restarted process reseeds the first context instead of blocking', async () => {
+    write('prompts.jsonc', definition(buildPolicy('BODY')));
+    const host = new FakeHost(dir);
+    host.role('build');
+    host.configuredSystem.set('build', 'CONFIG SYSTEM');
+    host.post((id) => host.configuredSystem.get(id));
+    host.sessions.set('s', { agent: 'build', model: OPENAI });
+    const first = await start(host);
+    await host.firePrompt('s');
+    expect(host.seedOf('build')).toContain('BODY');
+    await first.cleanup();
+    expect(host.seedOf('build')).toBe('CONFIG SYSTEM');
+
+    const { runtime, cleanup } = await start(host);
+    const event: ContextEvent = {
+      sessionID: 's',
+      agent: 'build',
+      model: OPENAI,
+      system: [{ text: 'GUARD' }, { text: 'CONFIG SYSTEM' }, { text: 'SECOND PART' }],
+      tools: {},
+    };
+    await host.fireContext(event);
+    const seed = `${beginMarker(runtime.generation, 'build')}\nBODY\n${endMarker(runtime.generation, 'build')}`;
+    expect(event.system[0]?.text).toBe('GUARD');
+    expect(event.system[1]?.text).toBe(seed);
+    expect(event.system[2]?.text).toBe('SECOND PART');
+    expect(host.seedOf('build')).toBe(seed);
+    expect(readFileSync(join(dir, 'opencode-prompts.log'), 'utf8')).toContain('"code":"reseeded"');
+    await cleanup();
+  });
+
+  test('two concurrent requests recover from the same pre-takeover snapshot', async () => {
+    write('prompts.jsonc', definition(buildPolicy('BODY')));
+    const host = new FakeHost(dir);
+    host.role('build');
+    host.configuredSystem.set('build', 'CONFIG SYSTEM');
+    host.post((id) => host.configuredSystem.get(id));
+    await host.reloadAgents();
+    host.sessions.set('one', { agent: 'build', model: OPENAI });
+    host.sessions.set('two', { agent: 'build', model: OPENAI });
+    const { runtime, cleanup } = await start(host);
+    const event = (sessionID: string): ContextEvent => ({
+      sessionID,
+      agent: 'build',
+      model: OPENAI,
+      system: [{ text: 'CONFIG SYSTEM' }],
+      tools: {},
+    });
+    const first = event('one');
+    const second = event('two');
+    await Promise.all([host.fireContext(first), host.fireContext(second)]);
+    const seed = `${beginMarker(runtime.generation, 'build')}\nBODY\n${endMarker(runtime.generation, 'build')}`;
+    expect(first.system[0]?.text).toBe(seed);
+    expect(second.system[0]?.text).toBe(seed);
+    expect(host.seedOf('build')).toBe(seed);
+    expect(readFileSync(join(dir, 'opencode-prompts.log'), 'utf8').match(/"code":"reseeded"/g)?.length).toBe(2);
+    await cleanup();
+  });
+
+  for (const configured of [undefined, '']) {
+    test(`a restarted managed role with ${configured === undefined ? 'omitted' : 'empty'} system renders its template`, async () => {
+      write('prompts.jsonc', definition(buildPolicy('BODY')));
+      const host = new FakeHost(dir);
+      host.role('build');
+      if (configured !== undefined) host.configuredSystem.set('build', configured);
+      host.post((id) => host.configuredSystem.get(id));
+      host.sessions.set('s', { agent: 'build', model: OPENAI });
+      const first = await start(host);
+      await host.firePrompt('s');
+      await first.cleanup();
+      expect(host.seedOf('build')).toBe('');
+
+      const { runtime, cleanup } = await start(host);
+      const event = host.contextOf('s', 'build', OPENAI);
+      event.system.unshift({ text: 'NEIGHBOR GUARD' });
+      event.system.push({ text: 'PROJECT INSTRUCTIONS' });
+      await host.fireContext(event);
+      expect(event.system[0]?.text).toBe('NEIGHBOR GUARD');
+      expect(event.system.at(-1)?.text).toBe('PROJECT INSTRUCTIONS');
+      const text = systemText(event.system);
+      expect(text).toContain('BODY');
+      expect(text).not.toContain(DEFAULT_SYSTEM);
+      expect(text).toContain(beginMarker(runtime.generation, 'build'));
+      expect(text.split('<<<opencode-prompts|').length - 1).toBe(2);
+      await cleanup();
+    });
+  }
+
+  test('duplicated native systems are ambiguous and fail closed', async () => {
+    write('prompts.jsonc', definition(buildPolicy('BODY')));
+    const host = new FakeHost(dir);
+    host.role('build');
+    host.configuredSystem.set('build', 'CONFIG SYSTEM');
+    host.post((id) => host.configuredSystem.get(id));
+    await host.reloadAgents();
+    host.sessions.set('s', { agent: 'build', model: OPENAI });
+    const { cleanup } = await start(host);
+    await expect(
+      host.fireContext({
+        sessionID: 's',
+        agent: 'build',
+        model: OPENAI,
+        system: [{ text: 'CONFIG SYSTEM' }, { text: 'CONFIG SYSTEM' }],
+        tools: {},
+      }),
+    ).rejects.toMatchObject({ code: 'region-missing' });
+    expect(host.seedOf('build')).toBe('CONFIG SYSTEM');
+    await cleanup();
+  });
+
+  test('a rendered body containing the reserved marker token fails before seeding', async () => {
+    write('prompts.jsonc', definition(buildPolicy('BODY <<<opencode-prompts|evil')));
+    const host = new FakeHost(dir);
+    host.role('build');
+    host.sessions.set('s', { agent: 'build', model: OPENAI });
+    const { cleanup } = await start(host);
+    await expect(host.firePrompt('s')).rejects.toMatchObject({ code: 'region-malformed' });
+    expect(host.seedOf('build')).toBe('');
+    expect(host.transforms.length).toBe(0);
+    const log = readFileSync(join(dir, 'opencode-prompts.log'), 'utf8');
+    expect(log).toContain('"code":"region-malformed"');
+    expect(log).toContain('"count":3');
+    await cleanup();
+  });
+
+  test('a registry seed corrupted after the transform is rejected', async () => {
+    write('prompts.jsonc', definition(buildPolicy('BODY')));
+    const host = new FakeHost(dir);
+    host.role('build');
+    host.sessions.set('s', { agent: 'build', model: OPENAI });
+    const { cleanup } = await start(host);
+    await host.firePrompt('s');
+    host.transforms.push((editor) => {
+      for (const agent of editor.list()) {
+        editor.update(agent.id, (target) => {
+          target.system = `${target.system ?? ''}\n<<<opencode-prompts|foreign`;
+        });
+      }
+    });
+    await host.reloadAgents();
+    await expect(host.firePrompt('s')).rejects.toMatchObject({ code: 'seed-missing' });
+    await cleanup();
+  });
+
+  test('an unrecognized native system still blocks without seeding the host', async () => {
+    write('prompts.jsonc', definition(buildPolicy('BODY')));
+    const host = new FakeHost(dir);
+    host.role('build');
+    host.configuredSystem.set('build', 'CONFIG SYSTEM');
+    host.post((id) => host.configuredSystem.get(id));
+    await host.reloadAgents();
+    host.sessions.set('s', { agent: 'build', model: OPENAI });
+    const { cleanup } = await start(host);
+    await expect(
+      host.fireContext({
+        sessionID: 's',
+        agent: 'build',
+        model: OPENAI,
+        system: [{ text: 'DIFFERENT SYSTEM' }],
+        tools: {},
+      }),
+    ).rejects.toMatchObject({ code: 'region-missing' });
+    expect(host.seedOf('build')).toBe('CONFIG SYSTEM');
     await cleanup();
   });
 

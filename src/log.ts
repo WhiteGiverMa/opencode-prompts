@@ -59,6 +59,7 @@ export const LOG_HINTS: Readonly<Record<string, string>> = {
   'tools-unavailable': 'the seed needs JSON-schema tool inputs; fix the definition or the tool plugin',
   'seed-missing': 'the managed role was not seeded; check the definition and retry admission',
   'unmanaged-marked': 'a role left the definition while marked; retry after the restored system is reloaded',
+  reseeded: 'no action required; the process restarted or reloaded and the managed role was seeded for this request',
   'region-missing': 'the admitted system lost the owned region; retry admission to reseed',
   'region-duplicate': 'the owned region appears more than once; remove the duplicate content',
   'region-malformed': 'the owned markers are reordered or altered; remove the modified content',
