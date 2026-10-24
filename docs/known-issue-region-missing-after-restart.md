@@ -73,13 +73,13 @@ context   ok
 - 中英文 README 已公开说明适用范围和绕行方式；当前生产产物保持第一轮部署版本，不因本次文档变更重建或重载服务。
 - 限制收尾实测（v2.1.2，真实隔离宿主 + mock 供应商）：`configured + parts` 的双模型会话恢复成功，`reseeded=2`、`admission=0`、两个邻接 GUARD 及尾部指令保留；`omitted + parts`、`empty + parts`、`configured + wrapped` 均在自动恢复阶段报 `region-missing`，脚本以非零状态退出。后面三项是缺口复现证据，不是验收通过。
 
-### 缺少的宿主能力（本地提案，未提交上游）
+### 缺少的宿主能力（已提交上游 issue）
 
 已核对公开 `@opencode/plugin` 2.0.24 声明以及 v2.1.2 对应源码：外部插件的 setup 早于内部 `ConfigAgentPlugin`，后者会把显式 `system: ""` 写回角色；而 context 钩子运行在默认正文生成以及更早钩子修改之后，拿到的只是没有来源信息的可变 part 数组。
 
 例如同一组 `[GUARD, DEFAULT, INITIAL]`，既可能来自“新增独立 GUARD”，也可能来自“角色正文被改成 GUARD，再新增独立 DEFAULT”。没有归属信息时无法同时保证替换正文和保留独立指令。复制宿主默认模板或猜下标不能解决这个问题。
 
-建议上游增加一个 **awaited primary-request preflight**：插件激活完成后、选取本次角色快照前执行，只需公开 `sessionID`，供插件先建立 owned seed，再由现有 context 用本请求的模型和工具渲染正文。候选接线位置为宿主 `packages/core/src/session/runner/llm.ts` 的 `prepareContext`、`context.select` 之前，公开类型涉及 `packages/plugin/src/{promise,effect}/session.ts`。这只是待讨论提案，不是当前可用 API；本轮没有实施宿主补丁或发布 issue。
+建议上游增加一个 **awaited primary-request preflight**：插件激活完成后、选取本次角色快照前执行，只需公开 `sessionID`，供插件先建立 owned seed，再由现有 context 用本请求的模型和工具渲染正文。候选接线位置为宿主 `packages/core/src/session/runner/llm.ts` 的 `prepareContext`、`context.select` 之前，公开类型涉及 `packages/plugin/src/{promise,effect}/session.ts`。已作为功能请求提交上游 [anomalyco/opencode#58572](https://github.com/anomalyco/opencode/issues/58572)（2026-10-24，提交前核实 dev `24b5ed8bcc` 路径仍在原位；相近 issue #57214 / #58390 / #56032 已在文中区分），不是当前可用 API；本轮没有实施宿主补丁。
 
 ## 第一轮验证记录（非当前全量通过声明）
 
