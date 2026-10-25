@@ -1,7 +1,7 @@
 # Known Issue: region-missing on first request after server restart
 
-> 状态：部分修复，剩余缺口作为使用限制保留（2026-10-23；暂不修改宿主）
-> 影响面：修复前每次 OpenCode 服务重启后，恢复会话的第一个请求被阻断一次，随后自愈。
+> 状态：重启恢复部分修复，热重载 seed 接管已补齐（2026-10-25）；剩余缺口作为使用限制保留，暂不修改宿主
+> 影响面：修复前服务重启/插件热重载后的首个恢复请求可能被阻断一次；热重载路径现在由 context 直接接管旧世代 region。
 
 ## 现象
 
@@ -101,6 +101,23 @@ context   ok
 - Windows OpenCode v2.1.2 记录新的 `cleanup/startup ok`，插件 API 显示 active，服务进程保持不变，没有重启服务。
 - Windows 原生 Node v24.15.0 已从部署路径导入插件入口，并用隔离的临时定义和 synthetic host 驱动两个无 admission 的恢复 context，确认 `reseeded=2` 且邻接 part 保留。没有发送生产模型请求或主动重启生产服务；Windows 生产重启恢复仍未实测。
 - 旧产物备份、部署路径、进程信息和完整收据只保留在 Git 忽略的本地证据目录，不随源码发布。
+
+## 热重载 seed 接管（2026-10-25）
+
+2026-10-25 的 live 故障补齐了同一生命周期的热重载分支：
+
+- 写入配置触发全量插件重载后，`opencode-prompts.log` 没有出现新世代的 `cleanup/startup`，下一次在飞请求的 `context` 直接报 `seed-missing`，后续 admission 连续被阻断，直到服务重启。
+- 根因不是 `agents.<id>.system` 为空：旧世代可能把完整的 owned region 留在宿主角色里，或新世代的 `agent.transform` 没有落盘；`seedAgent` 在 reload 后检查不到新世代 marker，于是抛 `seed-missing`。空/省略 system 走的是 `region-missing`，两者可区分。
+- 修复把 context 渲染作为权威路径：
+  - `classifyOwnedRegion` 区分 `current` / `stale` / `none` / `foreign`；
+  - `replaceAnyOwnedRegion` 直接接管上一世代遗留的完整 marker 对，generation 只是内部标识；
+  - `seedAgent` 在 reload 后只把 `stale` / `none` 记为 `deferred`，不再阻断请求；
+  - admission 和 context 写 `seed-deferred` 日志后继续；`foreign`、重复、乱序或改写 marker 仍然 fail-closed。
+- 验证：
+  - 新增单测覆盖旧世代 marker 接管、admission defer、邻接 part 保留；当前 `99 pass / 2 fail`，失败的两条仍是既有的 omitted/empty 恢复缺口。
+  - `qa/hot-reload.mjs` 在隔离 v2.1.2 上分别用「修改插件产物」和「写配置新增插件」触发热重载，均在在飞回合后 `reseeded` 成功。
+  - live 构建触发的 11:21 热重载后没有 `seed-missing`；11:28 的 admission/context 均为 `ok`。
+- 代价：`agent.transform` 现在只保证注册表尽力同步，请求正确性由 context 保证。这是热重载期间旧 transform 仍可能覆盖注册表时的必要降级；外来 marker 仍不会被猜测覆盖。
 
 ## 残余边界
 

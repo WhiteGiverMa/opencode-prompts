@@ -55,6 +55,89 @@ export function hasOwnedRegion(system: string | undefined, generation: string, a
 
 export type RegionReplacement = 'replaced' | 'missing';
 
+export type OwnedRegionState = 'current' | 'stale' | 'none' | 'foreign';
+
+/**
+ * Classifies a role system without mutating it. `stale` means exactly one
+ * complete marker pair for this agent exists under another generation: the
+ * host kept a seed from a previous plugin generation across a hot reload.
+ * Foreign or malformed marker content stays fail-closed.
+ */
+export function classifyOwnedRegion(
+  system: string | undefined,
+  generation: string,
+  agentID: string,
+): OwnedRegionState {
+  if (system === undefined) return 'none';
+  const namespace = markerNamespaceCount(system);
+  if (namespace === 0) return 'none';
+  if (hasOwnedRegion(system, generation, agentID)) return 'current';
+  if (namespace === 2 && scanAgentMarkers(system, agentID) !== undefined) return 'stale';
+  return 'foreign';
+}
+
+/**
+ * Replaces a complete owned region left by a previous plugin generation. The
+ * marker namespace proves the region belongs to this plugin and the embedded
+ * agent proves the role; the generation is internal. This lets a hot-reloaded
+ * runtime take over without needing the previous generation's in-memory seed.
+ */
+export function replaceAnyOwnedRegion(
+  system: SystemPartLike[],
+  generation: string,
+  agentID: string,
+  body: string,
+): RegionReplacement {
+  let namespace = 0;
+  let beginPart = -1;
+  let beginAt = -1;
+  let endAt = -1;
+  let endToken = '';
+  for (let index = 0; index < system.length; index += 1) {
+    const part = system[index];
+    if (part === undefined) continue;
+    namespace += occurrences(part.text, `${MARKER_ROOT}|`);
+    const scan = scanAgentMarkers(part.text, agentID);
+    if (scan === undefined) continue;
+    if (beginPart !== -1) throw regionFailure('region-duplicate', 1);
+    beginPart = index;
+    beginAt = scan.beginAt;
+    endAt = scan.endAt;
+    endToken = scan.endToken;
+  }
+  if (namespace === 0) return 'missing';
+  if (namespace !== 2) throw regionFailure('region-malformed', namespace);
+  if (beginPart === -1 || beginAt === -1 || endAt <= beginAt) throw regionFailure('region-malformed', namespace);
+  const part = system[beginPart];
+  if (part === undefined) throw regionFailure('region-malformed', namespace);
+  const prefix = part.text.slice(0, beginAt);
+  const suffix = part.text.slice(endAt + endToken.length);
+  system[beginPart] = { ...part, text: `${prefix}${wrapSeed(generation, agentID, body)}${suffix}` };
+  return 'replaced';
+}
+
+type MarkerScan = {
+  readonly beginAt: number;
+  readonly endAt: number;
+  readonly endToken: string;
+};
+
+function scanAgentMarkers(system: string, agentID: string): MarkerScan | undefined {
+  const escaped = escapeRegExp(agentID);
+  const begins = [...system.matchAll(new RegExp(`${escapeRegExp(MARKER_ROOT)}[|]g=[^|]*[|]agent=${escaped}[|]begin>>>`, 'g'))];
+  const ends = [...system.matchAll(new RegExp(`${escapeRegExp(MARKER_ROOT)}[|]g=[^|]*[|]agent=${escaped}[|]end>>>`, 'g'))];
+  if (begins.length !== 1 || ends.length !== 1) return undefined;
+  const begin = begins[0];
+  const end = ends[0];
+  if (begin === undefined || end === undefined || begin.index === undefined || end.index === undefined) return undefined;
+  if (end.index <= begin.index) return undefined;
+  return { beginAt: begin.index, endAt: end.index, endToken: end[0] };
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
  * Replaces exactly the owned body in one part. Returns `missing` when the host
  * rebuilt the role without any marker (a restarted process has no in-memory
@@ -93,7 +176,7 @@ export function replaceOwnedRegion(
   }
   if (namespace === 0) return 'missing';
   if (namespace !== 2) throw regionFailure('region-malformed', namespace);
-  if (beginPart === -1 || endPart === -1) throw regionFailure('region-malformed', namespace);
+  if (beginPart === -1 || endPart === -1) return 'missing';
   if (beginPart !== endPart || beginAt === -1 || endAt <= beginAt) throw regionFailure('region-malformed', namespace);
   const part = system[beginPart];
   if (part === undefined) throw regionFailure('region-malformed', namespace);

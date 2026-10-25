@@ -58,6 +58,7 @@ export const LOG_HINTS: Readonly<Record<string, string>> = {
   'agent-missing': 'the definition manages an agent that does not exist; enable it or remove the policy',
   'tools-unavailable': 'the seed needs JSON-schema tool inputs; fix the definition or the tool plugin',
   'seed-missing': 'the managed role was not seeded; check the definition and retry admission',
+  'seed-deferred': 'a hot reload kept an older generation or skipped the transform; the current request renders its owned region directly',
   'unmanaged-marked': 'a role left the definition while marked; retry after the restored system is reloaded',
   reseeded: 'no action required; the process restarted or reloaded and the managed role was seeded for this request',
   'region-missing': 'the admitted system lost the owned region; retry admission to reseed',

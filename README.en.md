@@ -83,6 +83,10 @@ This is a **known recovery compatibility gap, not a configuration error**. The p
 
 After this error, **send a new ordinary user message** in the same session so admission can establish a fresh seed. Waiting, pressing continue, or repeating synthetic/resume work does not guarantee recovery. For automatic recovery, a workaround is to configure a nonempty fallback `system` suitable for use when this plugin is disabled. It is not the template body and need not duplicate it; the earlier-hook limitation above still applies. `system: ""` does not mean there is no system prompt.
 
+### Hot reload
+
+When OpenCode hot-reloads this plugin, the host can keep the previous generation's complete marker region or fail to write the new generation's transform back into the registry. The `context` hook now takes over a stale owned region directly, logs `seed-deferred`, and lets the request continue. Only foreign, duplicated, reordered, or altered markers still block. `agent.transform` is therefore best-effort; the context renderer guarantees the actual request body.
+
 The project currently keeps the host unmodified and retains ownership checks. Full support requires a reliable host preflight or role-provenance API. See the [known-issue record](docs/known-issue-region-missing-after-restart.md) for reproduction, evidence and the missing host capability.
 
 ## Etc
@@ -101,5 +105,6 @@ The project currently keeps the host unmodified and retains ownership checks. Fu
 
 - Full QA: `node qa/native-v2.mjs` boots the official binary with a mock provider in an isolated environment, 26 cases.
 - Restart recovery QA: `node qa/restart-resume.mjs` SIGKILLs an isolated `serve --service` with two in-flight sessions sharing one agent and using different models. The default case checks recovery with a nonempty native system and independent neighbor parts. `QA_SYSTEM_MODE=omitted` / `empty` reproduce the known gap; `QA_NEIGHBOR_MODE=wrapped` reproduces the restriction on wrapping a markerless role body before recovery. These gap cases currently exit nonzero; they are not fixed. Set `OPENCODE_V2_BINARY` to select a host binary.
+- Hot reload QA: `node qa/hot-reload.mjs` (touches the copied plugin artifact) or `QA_RELOAD_MODE=config node qa/hot-reload.mjs` (adds a plugin through config) reloads the plugin during an in-flight turn in an isolated `serve --service` and verifies the stale region is taken over without `seed-missing`.
 - Verified on: official v2.0.24 + Linux/WSL2 + local mock.
 - MIT, see [LICENSE](LICENSE).

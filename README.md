@@ -83,6 +83,10 @@ bun run build
 
 遇到该错误后，在同一会话**发送一条新的普通消息**，让 admission 重新建立 seed；仅等待、点击继续或重复 synthetic/resume 不保证恢复。若需要自动恢复，可在 OpenCode 配置中给受管理角色设置一段非空、适合插件禁用时使用的后备 `system`。它不是模板正文，也不必复制模板内容；这是当前版本的绕行办法，并且仍受上述其他钩子改写限制影响。`system: ""` 不表示完全没有 system。
 
+### 热重载
+
+插件自己被 OpenCode 热重载时，宿主可能保留上一世代的完整 marker，或没有把新世代的 transform 写回注册表。现在 `context` 会直接接管旧世代遗留的 owned region，日志记 `seed-deferred`，请求继续；只有外来、重复、乱序或被改写的 marker 才会阻断。`agent.transform` 因此退化为尽力同步注册表，实际请求正文由 context 保证。
+
 本项目目前不修改宿主、不放宽归属检查；完整支持等待宿主提供可靠的 preflight 或正文归属接口。复现、证据与接口缺口见 [已知问题记录](docs/known-issue-region-missing-after-restart.md)。
 
 ## 其他
@@ -101,5 +105,6 @@ bun run build
 
 - 完整 QA：`node qa/native-v2.mjs`，在隔离环境里起官方二进制和 mock 供应商跑 26 个用例。
 - 重启恢复 QA：`node qa/restart-resume.mjs`，在隔离的 `serve --service` 中途 SIGKILL 两个共享角色、使用不同模型的会话。默认验证非空原生 system 和独立 neighbor part 的恢复；`QA_SYSTEM_MODE=omitted` / `empty` 复现已知缺口，`QA_NEIGHBOR_MODE=wrapped` 复现恢复前正文被包裹的限制。这些缺口用例当前预期以非零状态退出，不代表已修复。可用 `OPENCODE_V2_BINARY` 指定宿主二进制。
+- 热重载 QA：`node qa/hot-reload.mjs`（默认修改插件产物触发）或 `QA_RELOAD_MODE=config node qa/hot-reload.mjs`（写配置新增插件触发），在隔离 `serve --service` 的在飞回合中热重载插件，验证旧世代 region 被接管、没有 `seed-missing`。
 - 验证环境：官方 v2.0.24 + Linux/WSL2 + 本地 mock。
 - MIT，见 [LICENSE](LICENSE)。

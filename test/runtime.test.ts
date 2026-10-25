@@ -770,6 +770,74 @@ describe('region integrity and removal', () => {
     await cleanup();
   });
 
+  test('a hot reload takes over the previous generation region without blocking', async () => {
+    write('prompts.jsonc', definition(buildPolicy('BODY')));
+    const host = new FakeHost(dir);
+    host.role('build');
+    host.configuredSystem.set('build', 'CONFIG SYSTEM');
+    host.post((id) => host.configuredSystem.get(id));
+    host.sessions.set('s', { agent: 'build', model: OPENAI });
+    const first = await start(host);
+    await host.firePrompt('s');
+    const oldSeed = host.seedOf('build');
+    await first.cleanup();
+    host.agents.get('build')!.system = oldSeed;
+
+    const original = host.reloadAgents.bind(host);
+    host.reloadAgents = async () => {
+      await original();
+      const agent = host.agents.get('build');
+      if (agent !== undefined) agent.system = oldSeed;
+    };
+
+    const { runtime, cleanup } = await start(host);
+    await host.firePrompt('s');
+    const event: ContextEvent = {
+      sessionID: 's',
+      agent: 'build',
+      model: OPENAI,
+      system: [{ text: 'GUARD' }, { text: `PREFIX\n${oldSeed}\nSUFFIX` }, { text: 'TAIL' }],
+      tools: {},
+    };
+    await host.fireContext(event);
+    const seed = `${beginMarker(runtime.generation, 'build')}\nBODY\n${endMarker(runtime.generation, 'build')}`;
+    expect(event.system[0]?.text).toBe('GUARD');
+    expect(event.system[1]?.text).toBe(`PREFIX\n${seed}\nSUFFIX`);
+    expect(event.system[2]?.text).toBe('TAIL');
+    const log = readFileSync(join(dir, 'opencode-prompts.log'), 'utf8');
+    expect(log).toContain('"code":"seed-deferred"');
+    expect(log).toContain('"code":"reseeded"');
+    await cleanup();
+  });
+
+  test('a hot reload admission defers when the host keeps the old seed', async () => {
+    write('prompts.jsonc', definition(buildPolicy('BODY')));
+    const host = new FakeHost(dir);
+    host.role('build');
+    host.configuredSystem.set('build', 'CONFIG SYSTEM');
+    host.post((id) => host.configuredSystem.get(id));
+    host.sessions.set('s', { agent: 'build', model: OPENAI });
+    const first = await start(host);
+    await host.firePrompt('s');
+    const oldSeed = host.seedOf('build');
+    await first.cleanup();
+    host.agents.get('build')!.system = oldSeed;
+
+    const original = host.reloadAgents.bind(host);
+    host.reloadAgents = async () => {
+      await original();
+      const agent = host.agents.get('build');
+      if (agent !== undefined) agent.system = oldSeed;
+    };
+
+    const { cleanup } = await start(host);
+    await expect(host.firePrompt('s')).resolves.toBeUndefined();
+    const log = readFileSync(join(dir, 'opencode-prompts.log'), 'utf8');
+    expect(log).toContain('"code":"seed-deferred"');
+    expect(log).toContain('"phase":"admission","code":"ok"');
+    await cleanup();
+  });
+
   for (const configured of [undefined, '']) {
     test(`a restarted managed role with ${configured === undefined ? 'omitted' : 'empty'} system renders its template`, async () => {
       write('prompts.jsonc', definition(buildPolicy('BODY')));

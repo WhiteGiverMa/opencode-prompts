@@ -22,9 +22,11 @@ import { loadDefinition, preparePrompt, resolveSourcePath, type Definition, type
 import { AdapterError, PromptsBlockedError, failureFields, isRuntimeValue, toFailure, type Failure } from './failure.ts';
 import { DiagnosticsLog, type LogPhase } from './log.ts';
 import {
+  classifyOwnedRegion,
   hasMarkerNamespace,
   hasOwnedRegion,
   markerNamespaceCount,
+  replaceAnyOwnedRegion,
   replaceOwnedRegion,
   seedNativeRegion,
   wrapSeed,
@@ -46,13 +48,15 @@ import { snapshotTools, type ToolSnapshot } from './tools.ts';
 export { PromptsBlockedError } from './failure.ts';
 export {
   beginMarker,
+  classifyOwnedRegion,
   endMarker,
   hasOwnedRegion,
   markerNamespaceCount,
+  replaceAnyOwnedRegion,
   replaceOwnedRegion,
   seedNativeRegion,
 } from './markers.ts';
-export type { RegionReplacement, SystemPartLike } from './markers.ts';
+export type { OwnedRegionState, RegionReplacement, SystemPartLike } from './markers.ts';
 export type {
   AgentEditor,
   AgentRecord,
@@ -289,7 +293,16 @@ export class PromptsRuntime {
         }
         throw error;
       }
-      await this.seedAgent(signature, resolved.agentID, wrapSeed(this.generation, resolved.agentID, body));
+      const state = classifyOwnedRegion(current.system, this.generation, resolved.agentID);
+      const application = await this.seedAgent(
+        signature,
+        resolved.agentID,
+        wrapSeed(this.generation, resolved.agentID, body),
+        state === 'stale' ? 'skip' : 'capture',
+      );
+      if (application === 'deferred') {
+        this.log.write({ phase: 'seed', code: 'seed-deferred', session: event.sessionID, agent: agentID, model });
+      }
       this.log.write({
         phase: 'admission',
         code: 'ok',
@@ -328,17 +341,25 @@ export class PromptsRuntime {
         return;
       }
       const body = prepared.render({ agent: event.agent, model: event.model, tools: event.tools });
+      const seed = wrapSeed(this.generation, event.agent, body);
       if (replaceOwnedRegion(event.system, this.generation, event.agent, body) === 'missing') {
-        // The host resumes suspended turns through `session.synthetic`, which
-        // bypasses the prompt hook, so the first request after a restart has no
-        // in-memory seed. Use the pre-takeover native snapshot, seed the
-        // registry, then make this in-flight request use the same seed.
-        // Duplicate or altered markers never reach here: replaceOwnedRegion
-        // still throws for them.
-        const native = await this.nativeFor(event.agent);
-        const seed = wrapSeed(this.generation, event.agent, body);
-        seedNativeRegion(event.system, native, seed);
-        await this.seedAgent(managedSignature(definition), event.agent, seed);
+        // A hot reload can leave the previous generation's complete region in
+        // the role while the new generation has no in-memory seed. Take over
+        // that region directly; only a truly marker-less role needs the
+        // pre-takeover native snapshot.
+        if (replaceAnyOwnedRegion(event.system, this.generation, event.agent, body) === 'missing') {
+          const native = await this.nativeFor(event.agent);
+          seedNativeRegion(event.system, native, seed);
+        }
+        const application = await this.seedAgent(
+          managedSignature(definition),
+          event.agent,
+          seed,
+          'skip',
+        );
+        if (application === 'deferred') {
+          this.log.write({ phase: 'seed', code: 'seed-deferred', session, agent, model });
+        }
         this.log.write({ phase: 'context', code: 'reseeded', session, agent, model });
         return;
       }
@@ -425,8 +446,19 @@ export class PromptsRuntime {
    * Applies a wrapped seed to the host registry and verifies the owned region
    * survived the reload. Admission and context recovery share this path so a
    * recovered request is seeded exactly like an admitted one.
+   *
+   * A hot reload can keep the previous generation's seed or fail to apply the
+   * new transform at all. Both are reported as `deferred`, not fatal: the
+   * context hook renders the authoritative system for the actual request and
+   * takes over a stale region there. Foreign or malformed marker content still
+   * fails closed.
    */
-  private async seedAgent(signature: string, agentID: string, seed: string): Promise<void> {
+  private async seedAgent(
+    signature: string,
+    agentID: string,
+    seed: string,
+    native: 'capture' | 'skip' = 'capture',
+  ): Promise<'applied' | 'deferred'> {
     if (!hasOwnedRegion(seed, this.generation, agentID)) {
       throw new AdapterError({
         code: 'region-malformed',
@@ -434,15 +466,16 @@ export class PromptsRuntime {
         count: markerNamespaceCount(seed),
       });
     }
-    await this.nativeFor(agentID);
+    if (native === 'capture') await this.nativeFor(agentID);
     this.seeds.set(agentID, seed);
     await this.ensureRegistered(signature);
     if (this.applied.get(agentID) !== seed) await this.host.reloadAgents();
     const refreshed = (await this.host.listAgents()).find((agent) => agent.id === agentID);
     if (refreshed === undefined) throw new AdapterError({ code: 'agent-missing' });
-    if (!hasOwnedRegion(refreshed.system, this.generation, agentID)) {
-      throw new AdapterError({ code: 'seed-missing', slot: 'system' });
-    }
+    if (hasOwnedRegion(refreshed.system, this.generation, agentID)) return 'applied';
+    const state = classifyOwnedRegion(refreshed.system, this.generation, agentID);
+    if (state === 'stale' || state === 'none') return 'deferred';
+    throw new AdapterError({ code: 'seed-missing', slot: 'system' });
   }
 
   /**
